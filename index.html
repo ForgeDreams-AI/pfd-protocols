@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="PFD Protocols — private Phoenix Fire Department EMS protocol reference for paramedics.">
+<title>PFD Protocols</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- SIGNED-OUT VIEW: this is the ONLY thing unauthenticated visitors ever see.
+     No protocol content exists in this bundle. All content loads from Firestore
+     after an approved sign-in. -->
+<section id="view-signin" class="view">
+  <div class="signin-card">
+    <div class="brand"><span class="brand-cross">✚</span> PFD Protocols</div>
+    <p class="tagline">Phoenix Fire Department EMS protocol reference.<br>Authorized medics only.</p>
+    <form id="signin-form" autocomplete="on">
+      <label class="field"><span>Email</span>
+        <input id="signin-email" type="email" required autocomplete="username" placeholder="you@phoenix.gov">
+      </label>
+      <label class="field"><span>Password</span>
+        <input id="signin-pass" type="password" required autocomplete="current-password" placeholder="••••••••">
+      </label>
+      <p id="signin-error" class="form-error" hidden></p>
+      <button class="btn primary big" type="submit">Sign in</button>
+    </form>
+    <p class="fine">Need access? Ask your admin to approve your department email.</p>
+    <button id="theme-toggle" class="icon-btn" aria-label="Toggle dark mode">◐</button>
+  </div>
+</section>
+
+<!-- PENDING APPROVAL -->
+<section id="view-pending" class="view" hidden>
+  <div class="signin-card">
+    <div class="brand"><span class="brand-cross">✚</span> PFD Protocols</div>
+    <p class="tagline">Your account (<b id="pending-email"></b>) isn't on the approved list yet.<br>Ask your admin to approve it.</p>
+    <button id="pending-signout" class="btn secondary big">Sign out</button>
+  </div>
+</section>
+
+<!-- APP -->
+<section id="view-app" class="view" hidden>
+  <header class="topbar">
+    <div class="brand small"><span class="brand-cross">✚</span> PFD Protocols</div>
+    <div class="topbar-actions">
+      <button id="admin-btn" class="icon-btn" aria-label="Admin" hidden>⚙</button>
+      <button id="theme-toggle2" class="icon-btn" aria-label="Toggle dark mode">◐</button>
+      <button id="signout-btn" class="icon-btn" aria-label="Sign out">⏻</button>
+    </div>
+  </header>
+  <div class="search-wrap">
+    <input id="search" type="search" autocomplete="off" placeholder="Search protocols, drugs, procedures…" aria-label="Search protocols">
+  </div>
+  <div id="chips" class="chips" role="tablist" aria-label="Categories"></div>
+  <p id="result-count" class="result-count"></p>
+  <main id="results" class="results"></main>
+  <footer class="foot">For PFD personnel only. In any conflict, on-line medical direction (OLMD) prevails.</footer>
+</section>
+
+<!-- ADMIN -->
+<section id="view-admin" class="view" hidden>
+  <header class="topbar">
+    <button id="admin-back" class="btn secondary">← Back</button>
+    <div class="brand small"><span class="brand-cross">✚</span> Admin</div>
+    <span></span>
+  </header>
+  <div class="admin-panel">
+    <h2>Approved medics</h2>
+    <form id="allowlist-form" class="allowlist-form">
+      <input id="allowlist-email" type="email" required placeholder="medic@phoenix.gov" aria-label="Email to approve">
+      <label class="role-label"><input id="allowlist-admin" type="checkbox"> Admin</label>
+      <button class="btn primary" type="submit">Approve</button>
+    </form>
+    <p id="admin-error" class="form-error" hidden></p>
+    <ul id="allowlist" class="allowlist"></ul>
+  </div>
+</section>
+
+<!-- FOCUS MODE: one protocol, full screen, everything else hidden -->
+<div id="focus" class="focus" hidden role="dialog" aria-modal="true" aria-label="Protocol">
+  <div class="focus-bar">
+    <button id="focus-back" class="btn primary big">← Back to search</button>
+  </div>
+  <article id="focus-body" class="focus-body"></article>
+  <div class="focus-bar bottom">
+    <button id="focus-back2" class="btn primary big">← Back to search</button>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

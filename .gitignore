@@ -1,0 +1,8 @@
+# Local build + seed material — NEVER commit protocol content to the repo.
+# The public bundle must contain ONLY the sign-in page; all protocol content
+# lives in Firestore behind auth + allowlist.
+protocols.json
+serviceAccountKey.json
+node_modules/
+build/
+*.pdf
