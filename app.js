@@ -8,6 +8,29 @@ const CATEGORIES = ['All','Cardiac','Respiratory','Environmental','Medical','Tra
 const KEY_STORE = 'pfd-key-v1';
 
 let protocols = [], activeCat = 'All', cryptoKey = null;
+let codeIndex = {}, focusHist = [], focusId = null;
+
+/* cross-reference linking: protocol codes mentioned in card text become tappable */
+function normCode(s){ return String(s || '').toUpperCase().replace(/[\s\-.]+/g, ''); }
+const REF_PAT = '(?:ATG|PTG)\\s*\\d+\\s*-\\s*\\d+|Supplement\\s+\\d+\\s*-\\s*\\d+|(?:A|P|GI)\\s*-\\s*(?:\\d+|[A-P])';
+function buildCodeIndex(){
+  codeIndex = {};
+  protocols.forEach(p => { const n = normCode(p.code); if(n && !codeIndex[n]) codeIndex[n] = p; });
+}
+/* pure pointer cards (no real content, just "refer to X") forward to the real protocol */
+function detectRedirect(p){
+  if(!p) return null;
+  const SUB = ['indications','contraindications','adult_dose','peds_dose','medications','adverse','drug_class'];
+  for(const k of SUB){ if(p[k] && p[k].length) return null; }
+  const blob = ['includes','excludes','actions','notes','cautions'].map(k => {
+    const v = p[k]; return Array.isArray(v) ? v.join(' ') : String(v || '');
+  }).join(' ');
+  if(blob.length > 600) return null;
+  const m = blob.match(new RegExp('(?:refer to|see)\\s*(' + REF_PAT + ')', 'i'));
+  if(!m) return null;
+  const t = codeIndex[normCode(m[1])];
+  return (t && t.id !== p.id) ? t : null;
+}
 
 const te = new TextEncoder();
 function b64ToBytes(s){
@@ -64,6 +87,7 @@ async function unlockWithKey(key){
   const text = new TextDecoder().decode(pt);
   protocols = JSON.parse(text);
   protocols.sort((a,b) => (a.code || '').localeCompare(b.code || ''));
+  buildCodeIndex();
   cryptoKey = derived;
   // keep the derived key tab-scoped only: closing the tab re-locks the app
   try {
@@ -128,13 +152,30 @@ function filtered(){
     return searchText(p).includes(q);
   });
 }
-function highlight(text, q){
-  const t = esc(text);
+function highlight(text, q){ return mark(esc(text), q); }
+function mark(t, q){
   if(!q) return t;
   try {
     const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'ig');
     return t.replace(re, '<mark>$1</mark>');
   } catch(e){ return t; }
+}
+/* rich text: escape, turn known protocol-code mentions into tappable links, highlight query */
+function rich(text, q){
+  const raw = String(text == null ? '' : text);
+  const parts = raw.split(new RegExp('(' + REF_PAT + ')', 'gi'));
+  const full = new RegExp('^(?:' + REF_PAT + ')$', 'i');
+  return parts.map(seg => {
+    if(full.test(seg)){
+      const t = codeIndex[normCode(seg)];
+      if(t) return '<a class="xref" data-xref="' + t.id + '">' + mark(esc(seg), q) + '</a>';
+    }
+    return mark(esc(seg), q);
+  }).join('');
+}
+function updatePrevBtn(){
+  const b = $('focus-prev');
+  if(b) b.hidden = focusHist.length === 0;
 }
 function render(){
   const q = $('search').value.trim();
@@ -157,54 +198,68 @@ function render(){
 }
 
 /* ---------- focus mode ---------- */
-function openFocus(p, q){
+function openFocus(p, q, via){
+  /* pure pointer cards forward straight to the real protocol */
+  let banner = '';
+  const redir = detectRedirect(p);
+  if(redir && !(via && via.from === redir.id)){
+    banner = '<div class="redir">↪ <b>' + esc(p.code) + ' · ' + esc(p.title) + '</b><br>' +
+      'This page is a cross-reference in the source — showing <b>' +
+      esc(redir.code) + ' · ' + esc(redir.title) + '</b> instead.</div>';
+    p = redir;
+  }
+  if(via && via.push && focusId && focusId !== p.id) focusHist.push(focusId);
+  else if(!via) { focusHist = []; }
+  focusId = p.id;
   const body = $('focus-body');
-  let h = '<span class="code">' + esc(p.code) + '</span>';
-  h += '<h1>' + highlight(p.title, q) + '</h1>';
+  let h = banner + '<span class="code">' + esc(p.code) + '</span>';
+  h += '<h1>' + rich(p.title, q) + '</h1>';
   h += '<div class="src">' + esc(p.source || '') + '</div>';
-  if(p.includes) h += '<h2>Scope</h2><p>' + highlight(p.includes, q) + '</p>';
-  if(p.excludes) h += '<h2>Excludes</h2><p>' + highlight(p.excludes, q) + '</p>';
-  if(p.drug_class) h += '<h2>Class</h2><p>' + highlight(p.drug_class, q) + '</p>';
+  if(p.includes) h += '<h2>Scope</h2><p>' + rich(p.includes, q) + '</p>';
+  if(p.excludes) h += '<h2>Excludes</h2><p>' + rich(p.excludes, q) + '</p>';
+  if(p.drug_class) h += '<h2>Class</h2><p>' + rich(p.drug_class, q) + '</p>';
   if(p.indications && p.indications.length){
-    h += '<h2>Indications</h2><ul>' + p.indications.map(i => '<li>' + highlight(i, q) + '</li>').join('') + '</ul>';
+    h += '<h2>Indications</h2><ul>' + p.indications.map(i => '<li>' + rich(i, q) + '</li>').join('') + '</ul>';
   }
   if(p.contraindications && p.contraindications.length){
-    h += '<h2>Contraindications</h2><ul>' + p.contraindications.map(i => '<li>' + highlight(i, q) + '</li>').join('') + '</ul>';
+    h += '<h2>Contraindications</h2><ul>' + p.contraindications.map(i => '<li>' + rich(i, q) + '</li>').join('') + '</ul>';
   }
   if(p.adult_dose || p.peds_dose){
     h += '<h2>Dosing</h2>';
-    if(p.adult_dose) h += '<div class="med"><b>Adult:</b> ' + highlight(p.adult_dose, q) + '</div>';
-    if(p.peds_dose) h += '<div class="med"><b>Pediatric:</b> ' + highlight(p.peds_dose, q) + '</div>';
+    if(p.adult_dose) h += '<div class="med"><b>Adult:</b> ' + rich(p.adult_dose, q) + '</div>';
+    if(p.peds_dose) h += '<div class="med"><b>Pediatric:</b> ' + rich(p.peds_dose, q) + '</div>';
   }
   if(p.actions && p.actions.length){
-    h += '<h2>Actions</h2><ol>' + p.actions.map(a => '<li>' + highlight(a, q) + '</li>').join('') + '</ol>';
+    h += '<h2>Actions</h2><ol>' + p.actions.map(a => '<li>' + rich(a, q) + '</li>').join('') + '</ol>';
   }
   if(p.medications && p.medications.length){
     h += '<h2>Medications</h2>' + p.medications.map(m => {
-      let t = '<div class="med"><b>' + highlight(m.drug, q) + '</b> — ' + highlight(m.dose || '', q);
-      if(m.repeat) t += ' <span>(' + highlight(m.repeat, q) + ')</span>';
-      if(m.max) t += '<br>Max: ' + highlight(m.max, q);
-      if(m.note) t += '<br><i>' + highlight(m.note, q) + '</i>';
+      let t = '<div class="med"><b>' + rich(m.drug, q) + '</b> — ' + rich(m.dose || '', q);
+      if(m.repeat) t += ' <span>(' + rich(m.repeat, q) + ')</span>';
+      if(m.max) t += '<br>Max: ' + rich(m.max, q);
+      if(m.note) t += '<br><i>' + rich(m.note, q) + '</i>';
       return t + '</div>';
     }).join('');
   }
   if(p.adverse && p.adverse.length){
-    h += '<h2>Adverse effects</h2><ul>' + p.adverse.map(i => '<li>' + highlight(i, q) + '</li>').join('') + '</ul>';
+    h += '<h2>Adverse effects</h2><ul>' + p.adverse.map(i => '<li>' + rich(i, q) + '</li>').join('') + '</ul>';
   }
   if(p.cautions && p.cautions.length){
-    p.cautions.forEach(c => { h += '<div class="caution">⚠ ' + highlight(c, q) + '</div>'; });
+    p.cautions.forEach(c => { h += '<div class="caution">⚠ ' + rich(c, q) + '</div>'; });
   }
   if(p.notes && p.notes.length){
-    h += '<h2>Notes</h2><ul>' + p.notes.map(i => '<li>' + highlight(i, q) + '</li>').join('') + '</ul>';
+    h += '<h2>Notes</h2><ul>' + p.notes.map(i => '<li>' + rich(i, q) + '</li>').join('') + '</ul>';
   }
   body.innerHTML = h;
   $('focus').hidden = false;
   document.body.style.overflow = 'hidden';
   $('focus').scrollTop = 0;
+  updatePrevBtn();
 }
 function closeFocus(){
   $('focus').hidden = true;
   document.body.style.overflow = '';
+  focusHist = []; focusId = null; updatePrevBtn();
 }
 
 /* ---------- boot ---------- */
@@ -233,6 +288,19 @@ async function boot(){
   $('search').addEventListener('input', render);
   $('focus-back').addEventListener('click', closeFocus);
   $('focus-back2').addEventListener('click', closeFocus);
+  $('focus-prev').addEventListener('click', () => {
+    const id = focusHist.pop();
+    updatePrevBtn();
+    const t = protocols.find(p => p.id === id);
+    if(t) openFocus(t, $('search').value.trim());
+  });
+  $('focus-body').addEventListener('click', e => {
+    const a = e.target.closest('a.xref');
+    if(!a) return;
+    e.preventDefault();
+    const t = protocols.find(p => p.id === a.getAttribute('data-xref'));
+    if(t) openFocus(t, $('search').value.trim(), {push: true});
+  });
   document.addEventListener('keydown', e => { if(e.key === 'Escape') closeFocus(); });
   const ok = await trySilentUnlock();
   if(!ok){ show('view-gate'); setTimeout(() => $('gate-code').focus(), 60); }
