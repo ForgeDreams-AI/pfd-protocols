@@ -1,10 +1,21 @@
 'use strict';
-/* PFD Protocols — private paramedic reference. No protocol content lives in this
-   bundle; everything loads from Firestore after an approved sign-in. */
+/* PFD Protocols — private paramedic reference.
+   Zero-backend privacy: protocols ship as AES-256-GCM ciphertext
+   (protocols.enc.json). The access code is never stored; the derived key
+   lives in memory + tab-scoped sessionStorage only. Close the tab → locked. */
 const $ = id => document.getElementById(id);
 const CATEGORIES = ['All','Cardiac','Respiratory','Environmental','Medical','Trauma','OB/Gyn','Pediatric','Procedures','Operations','Drugs','Reference'];
+const KEY_STORE = 'pfd-key-v1';
 
-let db = null, auth = null, protocols = [], isAdmin = false, activeCat = 'All';
+let protocols = [], activeCat = 'All', cryptoKey = null;
+
+const te = new TextEncoder();
+function b64ToBytes(s){
+  const bin = atob(s);
+  const b = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+  return b;
+}
 
 /* ---------- theme ---------- */
 function applyTheme(){
@@ -24,87 +35,80 @@ function esc(s){
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-function normEmail(e){ return (e || '').trim().toLowerCase(); }
 
 /* ---------- views ---------- */
-const VIEWS = ['view-signin','view-pending','view-app','view-admin'];
+const VIEWS = ['view-gate','view-app'];
 function show(id){
   VIEWS.forEach(v => $(v).hidden = (v !== id));
   window.scrollTo(0,0);
 }
 
-/* ---------- auth ---------- */
-function authError(msg){
-  const el = $('signin-error');
+/* ---------- crypto gate ---------- */
+function gateError(msg){
+  const el = $('gate-error');
   el.textContent = msg; el.hidden = false;
 }
-async function boot(){
-  applyTheme();
-  if(!window.firebase || firebaseConfig.apiKey === 'REPLACE_ME'){
-    authError('App not configured yet — Firebase setup is incomplete.');
-    return;
-  }
-  firebase.initializeApp(firebaseConfig);
-  auth = firebase.auth(); db = firebase.firestore();
-  try { await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL); } catch(e){}
-  $('signin-form').addEventListener('submit', async e => {
-    e.preventDefault();
-    $('signin-error').hidden = true;
-    const email = normEmail($('signin-email').value);
-    const pass = $('signin-pass').value;
-    try {
-      await auth.signInWithEmailAndPassword(email, pass);
-    } catch(err){
-      authError(err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential'
-        ? 'Wrong email or password.' : 'Sign-in failed. Check your connection and try again.');
-    }
-  });
-  $('signout-btn').addEventListener('click', () => auth.signOut());
-  $('pending-signout').addEventListener('click', () => auth.signOut());
-  $('theme-toggle').addEventListener('click', toggleTheme);
-  $('theme-toggle2').addEventListener('click', toggleTheme);
-  $('admin-btn').addEventListener('click', () => { show('view-admin'); loadAllowlist(); });
-  $('admin-back').addEventListener('click', () => show('view-app'));
-  $('allowlist-form').addEventListener('submit', onAllowlistAdd);
-  $('search').addEventListener('input', render);
-  auth.onAuthStateChanged(onAuth);
+async function deriveKey(code, salt, iterations){
+  const base = await crypto.subtle.importKey('raw', te.encode(code), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name: 'PBKDF2', salt, iterations, hash: 'SHA-256'},
+    base, {name: 'AES-GCM', length: 256}, true, ['decrypt']);
 }
-
-async function onAuth(user){
-  closeFocus();
-  if(!user){ show('view-signin'); return; }
-  const email = normEmail(user.email);
-  let doc;
-  try {
-    doc = await db.collection('allowlist').doc(email).get();
-  } catch(err){
-    // Permission denied here means rules are working as intended for non-members.
-    authError('Could not verify access. Signing out.');
-    await auth.signOut(); return;
-  }
-  if(!doc.exists){
-    $('pending-email').textContent = email;
-    show('view-pending'); return;
-  }
-  isAdmin = doc.data().role === 'admin';
-  $('admin-btn').hidden = !isAdmin;
-  await loadProtocols();
-  buildChips();
-  render();
-  show('view-app');
-}
-
-/* ---------- data ---------- */
-async function loadProtocols(){
-  const snap = await db.collection('protocols').get();
-  protocols = snap.docs.map(d => Object.assign({id: d.id}, d.data()));
+async function unlockWithKey(key){
+  const res = await fetch('protocols.enc.json', {cache: 'no-store'});
+  if(!res.ok) throw new Error('fetch');
+  const blob = await res.json();
+  const salt = b64ToBytes(blob.salt), iv = b64ToBytes(blob.iv), ct = b64ToBytes(blob.ct);
+  const derived = key || await deriveKey($('gate-code').value, salt, blob.iter || 210000);
+  const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv}, derived, ct);
+  const text = new TextDecoder().decode(pt);
+  protocols = JSON.parse(text);
   protocols.sort((a,b) => (a.code || '').localeCompare(b.code || ''));
+  cryptoKey = derived;
+  // keep the derived key tab-scoped only: closing the tab re-locks the app
+  try {
+    const jwk = await crypto.subtle.exportKey('jwk', derived);
+    sessionStorage.setItem(KEY_STORE, JSON.stringify(jwk));
+  } catch(e){}
+  $('gate-code').value = '';
+  buildChips(); render(); show('view-app');
+  setTimeout(() => $('search').focus(), 60);
 }
-function searchText(p){
-  return (p.search_text || '').toLowerCase();
+async function trySilentUnlock(){
+  let jwk = null;
+  try { jwk = JSON.parse(sessionStorage.getItem(KEY_STORE) || 'null'); } catch(e){}
+  if(!jwk) return false;
+  try {
+    const key = await crypto.subtle.importKey('jwk', jwk, {name: 'AES-GCM', length: 256}, true, ['decrypt']);
+    await unlockWithKey(key);
+    return true;
+  } catch(e){
+    try { sessionStorage.removeItem(KEY_STORE); } catch(_){}
+    return false;
+  }
+}
+function lock(){
+  protocols = []; cryptoKey = null;
+  try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
+  closeFocus();
+  $('search').value = ''; activeCat = 'All';
+  $('results').innerHTML = ''; $('result-count').textContent = '';
+  show('view-gate');
+  setTimeout(() => $('gate-code').focus(), 60);
 }
 
 /* ---------- search & browse ---------- */
+function searchText(p){
+  if(p._st) return p._st;
+  const parts = [p.code, p.title, p.category, p.population, p.source,
+    p.includes, p.excludes, p.drug_class, p.adult_dose, p.peds_dose];
+  ['indications','contraindications','actions','adverse','cautions','notes']
+    .forEach(k => { if(Array.isArray(p[k])) parts.push(p[k].join(' ')); });
+  if(Array.isArray(p.medications)) p.medications.forEach(m =>
+    parts.push(m.drug, m.dose, m.repeat, m.max, m.note));
+  p._st = parts.filter(Boolean).join(' ').toLowerCase();
+  return p._st;
+}
 function buildChips(){
   const wrap = $('chips'); wrap.innerHTML = '';
   CATEGORIES.forEach(c => {
@@ -202,55 +206,36 @@ function closeFocus(){
   $('focus').hidden = true;
   document.body.style.overflow = '';
 }
-$('focus-back').addEventListener('click', closeFocus);
-$('focus-back2').addEventListener('click', closeFocus);
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeFocus(); });
 
-/* ---------- admin ---------- */
-async function loadAllowlist(){
-  const el = $('allowlist'); el.innerHTML = '<li>Loading…</li>';
-  $('admin-error').hidden = true;
-  try {
-    const snap = await db.collection('allowlist').orderBy('email').get();
-    el.innerHTML = '';
-    snap.forEach(d => {
-      const data = d.data();
-      const li = document.createElement('li');
-      li.innerHTML = '<span class="email">' + esc(data.email) + '</span>'
-        + '<span class="role ' + (data.role === 'admin' ? '' : 'medic') + '">' + esc(data.role) + '</span>';
-      const rm = document.createElement('button');
-      rm.textContent = '✕'; rm.setAttribute('aria-label', 'Remove ' + data.email);
-      rm.addEventListener('click', async () => {
-        if(!confirm('Remove ' + data.email + '?')) return;
-        await db.collection('allowlist').doc(d.id).delete();
-        loadAllowlist();
-      });
-      li.appendChild(rm);
-      el.appendChild(li);
-    });
-    if(!snap.size) el.innerHTML = '<li>No approved medics yet.</li>';
-  } catch(err){
-    $('admin-error').textContent = 'Could not load the list.'; $('admin-error').hidden = false;
+/* ---------- boot ---------- */
+async function boot(){
+  applyTheme();
+  if(!window.crypto || !crypto.subtle){
+    gateError('This browser cannot do the encryption this app needs. Use a current Chrome, Safari, or Edge.');
+    return;
   }
-}
-async function onAllowlistAdd(e){
-  e.preventDefault();
-  $('admin-error').hidden = true;
-  const email = normEmail($('allowlist-email').value);
-  const role = $('allowlist-admin').checked ? 'admin' : 'medic';
-  if(!email) return;
-  try {
-    await db.collection('allowlist').doc(email).set({
-      email, role,
-      addedBy: normEmail(auth.currentUser.email),
-      addedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    $('allowlist-email').value = ''; $('allowlist-admin').checked = false;
-    loadAllowlist();
-  } catch(err){
-    $('admin-error').textContent = 'Could not add — check your admin rights.';
-    $('admin-error').hidden = false;
-  }
+  $('gate-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('gate-error').hidden = true;
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true; btn.textContent = 'Unlocking…';
+    try {
+      await unlockWithKey(null);
+    } catch(err){
+      gateError('Wrong code. Try again.');
+      try { sessionStorage.removeItem(KEY_STORE); } catch(_){}
+    }
+    btn.disabled = false; btn.textContent = 'Unlock';
+  });
+  $('lock-btn').addEventListener('click', lock);
+  $('theme-toggle').addEventListener('click', toggleTheme);
+  $('theme-toggle2').addEventListener('click', toggleTheme);
+  $('search').addEventListener('input', render);
+  $('focus-back').addEventListener('click', closeFocus);
+  $('focus-back2').addEventListener('click', closeFocus);
+  document.addEventListener('keydown', e => { if(e.key === 'Escape') closeFocus(); });
+  const ok = await trySilentUnlock();
+  if(!ok){ show('view-gate'); setTimeout(() => $('gate-code').focus(), 60); }
 }
 
 document.addEventListener('DOMContentLoaded', boot);

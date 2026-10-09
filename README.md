@@ -1,44 +1,43 @@
 # PFD Protocols
 
 Private, searchable Phoenix Fire Department EMS protocol reference for paramedics.
-Mobile-first, built for use on scene.
+Mobile-first, built for use on scene. **Zero backend, zero accounts, zero cost.**
 
 **Privacy architecture (read this before touching anything):**
-- This repo's public bundle contains ONLY the sign-in page. There is deliberately
-  **zero protocol content** in this repository — no JSON, no text, nothing to leak.
-- All protocol/drug content lives in Cloud Firestore and is served only to
-  signed-in users whose email is on the admin-managed allowlist (`firestore.rules`
-  enforces this server-side).
-- The seed data (`protocols.json`) and service-account key live ONLY on the
-  maintainer's machine, never in git (see `.gitignore`).
+- The repo contains NO readable protocol content. `protocols.enc.json` is
+  AES-256-GCM ciphertext — without the access code it is random noise.
+- The access code unlocks the app in the browser: the key is derived with
+  PBKDF2-HMAC-SHA256 (210,000 iterations) via WebCrypto and the protocols are
+  decrypted in memory only.
+- The derived key is kept in tab-scoped `sessionStorage`. Closing the tab
+  re-locks the app. The code itself is never stored anywhere, and the
+  plaintext protocols never touch `localStorage` or disk.
+- The seed file (`../seed/protocols.json`, gitignored) lives only on the
+  maintainer's machine.
 
-## Setup (one-time, ~15 minutes)
+## Rotating the access code
 
-Full click-by-click instructions: [`FIREBASE_SETUP.md`](FIREBASE_SETUP.md).
+One command. The code comes from the `PFD_CODE` env var — never a file,
+never a shell history entry:
 
-1. Create a Firebase project (console.firebase.google.com) in your Google account.
-2. Add a Web app → copy the config into `firebase-config.js`.
-3. Enable **Authentication → Email/Password** sign-in method.
-4. Create **Firestore Database** (production mode).
-5. Deploy `firestore.rules` (Firebase console → Firestore → Rules, paste, Publish).
-6. Create your first user: Authentication → Users → Add user (your email + a password).
-7. Firestore → `allowlist` collection → Add document: document ID = your email
-   lowercased (e.g. `anthony.hidalgo2@phoenix.gov`), fields: `email` (string, same),
-   `role` (string, `admin`).
-8. Seed the content: `cd seed && npm i firebase-admin`, add `serviceAccountKey.json`
-   (Project settings → Service accounts → Generate new private key), then
-   `node seed.js` with `protocols.json` beside it.
-9. Enable GitHub Pages on this repo (Settings → Pages → Deploy from branch: `main`, `/`).
-   The live app will be at `https://forgedreams-ai.github.io/pfd-protocols/`.
+```sh
+cd repo
+PFD_CODE='new-code-here' python3 tools/encrypt.py
+git add protocols.enc.json && git commit -m "Rotate access code" && git push
+```
 
-## Managing access
+The old code stops working the moment the new blob is live.
 
-Sign in as the admin → ⚙ Admin → type a medic's department email → Approve.
-Admins can also remove people or grant admin to another medic. Anyone not on the
-list sees "access pending approval" and no protocol content, ever.
+## Updating protocol content
 
-## Updating protocols
+1. Re-extract / edit `../seed/protocols.json` (167 cards, schema unchanged).
+2. Re-run the encrypt command above with the current code.
+3. Commit + push.
 
-When the treatment guidelines are revised: re-run the extraction, replace
-`seed/protocols.json`, run `node seed/seed.js` again (it clears and re-seeds).
-A scheduled check reviews the department SharePoint for updates every 30 days.
+## Serving
+
+Any static host works (GitHub Pages: Settings → Pages → Deploy from branch
+`main`, `/`). Live: https://forgedreams-ai.github.io/pfd-protocols/
+
+A scheduled check reviews the department SharePoint treatment guidelines for
+updates every 30 days.
